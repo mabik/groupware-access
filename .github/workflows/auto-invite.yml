@@ -1,0 +1,249 @@
+name: Auto-invite to private repo
+
+# 동작:
+# 1. 사용자가 access-request 폼으로 issue 작성 (잠시 공개됨, 수 초~1분)
+# 2. 본 워크플로우가 즉시 작동:
+#    a. 입력값 파싱 + 이메일 도메인 검증
+#    b. 협업자 등록 (자동초대)
+#    c. 감사 로그를 private audit 리포에 복사 (PII 보존)
+#    d. 원본 issue body를 "[처리됨]"으로 redact (edit history도 sanitize)
+#    e. 원본 issue 삭제 (공개 흔적 제거)
+# 3. 사용자에게는 GitHub 초대 메일이 도착 (자기 verified email로)
+#
+# Privacy 모드 옵션:
+#   PRIVACY_MODE=delete  (기본) — issue redact + 삭제, 공개 흔적 zero
+#   PRIVACY_MODE=lock           — issue redact + 잠금, 공개 흔적은 "[처리됨]"만
+#   PRIVACY_MODE=keep            — 원본 그대로 (디버깅용, 운영 미권장)
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  invite:
+    if: contains(github.event.issue.labels.*.name, 'access-request')
+    runs-on: ubuntu-latest
+    env:
+      PRIVATE_OWNER: mabik
+      PRIVATE_REPO: groupware
+      ALLOWED_DOMAIN: mabik.re.kr
+      AUDIT_OWNER: mabik
+      AUDIT_REPO: groupware-audit
+      PRIVACY_MODE: delete
+      # Admin/bot 계정은 검증 건너뜀 — 콤마 구분 GitHub username 목록.
+      # 이 목록의 계정이 폼을 제출하면 이메일 도메인 검증 없이 통과 후 이미 협업자(또는 자동초대) 처리.
+      ADMIN_USERNAMES: "methylome,mabik-bot"
+    steps:
+      - name: Checkout (필요 — issue parser가 템플릿 파일을 디스크에서 읽음)
+        uses: actions/checkout@v4
+
+      - name: Mask PII in logs
+        env:
+          BODY: ${{ github.event.issue.body }}
+        run: |
+          # 본문 전체를 즉시 마스킹 처리. Action 로그에 PII가 새지 않도록.
+          echo "::add-mask::${BODY}"
+
+      - name: Parse issue body
+        id: parse
+        uses: stefanbuck/github-issue-parser@v3
+        with:
+          template-path: .github/ISSUE_TEMPLATE/access-request.yml
+
+      - name: Mask parsed values in logs
+        run: |
+          echo "::add-mask::${{ steps.parse.outputs.issueparser_email }}"
+          echo "::add-mask::${{ steps.parse.outputs.issueparser_full_name }}"
+          echo "::add-mask::${{ steps.parse.outputs.issueparser_department }}"
+
+      - name: Normalize issue title (overwrite user-edited title)
+        uses: actions/github-script@v7
+        env:
+          USERNAME: ${{ steps.parse.outputs.issueparser_github_username }}
+        with:
+          github-token: ${{ secrets.ADMIN_PAT }}
+          script: |
+            const username = (process.env.USERNAME || '').trim() || 'unknown';
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              title: `[액세스 요청] @${username}`,
+            });
+
+      - name: Validate, invite, audit-log
+        id: process
+        uses: actions/github-script@v7
+        env:
+          USERNAME: ${{ steps.parse.outputs.issueparser_github_username }}
+          FULL_NAME: ${{ steps.parse.outputs.issueparser_full_name }}
+          EMAIL: ${{ steps.parse.outputs.issueparser_email }}
+          DEPT: ${{ steps.parse.outputs.issueparser_department }}
+          CLIENT: ${{ steps.parse.outputs.issueparser_client }}
+          PURPOSE: ${{ steps.parse.outputs.issueparser_purpose }}
+        with:
+          github-token: ${{ secrets.ADMIN_PAT }}
+          script: |
+            const {
+              USERNAME, FULL_NAME, EMAIL, DEPT, CLIENT, PURPOSE,
+              PRIVATE_OWNER, PRIVATE_REPO, ALLOWED_DOMAIN,
+              AUDIT_OWNER, AUDIT_REPO, ADMIN_USERNAMES,
+            } = process.env;
+
+            const submitter = context.payload.issue.user.login.toLowerCase();
+            const adminList = (ADMIN_USERNAMES || '')
+              .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+            const isAdmin = adminList.includes(submitter);
+
+            // Helper: 결과(어떤 분기든)를 audit 리포에 기록.
+            // invite 단계에서 어떤 분기로 가든 한 건씩 audit issue를 남긴다.
+            const writeAudit = async (status, extra = {}) => {
+              try {
+                await github.rest.issues.create({
+                  owner: AUDIT_OWNER,
+                  repo: AUDIT_REPO,
+                  title: `[${status}] @${(USERNAME || 'unknown').trim()}` +
+                         (FULL_NAME ? ` (${FULL_NAME.trim()})` : ''),
+                  body: [
+                    '## 액세스 요청 처리 기록',
+                    '',
+                    `**status:** ${status}`,
+                    extra.reason ? `**reason:** ${extra.reason}` : '',
+                    '',
+                    '| 항목 | 값 |',
+                    '|------|-----|',
+                    `| 작성자(GitHub) | @${submitter} |`,
+                    `| GitHub 사용자명(폼) | @${(USERNAME || '').trim() || '-'} |`,
+                    `| 성명 | ${(FULL_NAME || '').trim() || '-'} |`,
+                    `| 이메일 | ${extra.email || EMAIL || '-'} |`,
+                    `| 부서 | ${(DEPT || '').trim() || '-'} |`,
+                    `| 사용 환경 | ${(CLIENT || '').trim() || '-'} |`,
+                    `| 사용 목적 | ${(PURPOSE || '').trim() || '-'} |`,
+                    `| 처리 시각 | ${new Date().toISOString()} |`,
+                    `| 원본 신청 | ${context.repo.owner}/${context.repo.repo}#${context.issue.number} (삭제 예정) |`,
+                    `| Admin allowlist? | ${isAdmin ? 'yes' : 'no'} |`,
+                  ].filter(Boolean).join('\n'),
+                  labels: ['audit', status],
+                });
+              } catch (e) {
+                core.warning(`Audit log creation failed: ${e.message}`);
+              }
+            };
+
+            const setStatus = async (status, reason, extra = {}) => {
+              core.setOutput('status', status);
+              if (reason) core.setOutput('reason', reason);
+              await writeAudit(status, { ...extra, reason });
+            };
+
+            // 1) 이메일 정규화 + 도메인 검증 (admin은 우회)
+            let email = (EMAIL || '').trim().toLowerCase();
+            if (!email.includes('@')) {
+              email = email + '@' + ALLOWED_DOMAIN;
+            }
+            if (!isAdmin && !email.endsWith('@' + ALLOWED_DOMAIN)) {
+              return setStatus('rejected', `이메일 도메인이 @${ALLOWED_DOMAIN}이 아닙니다.`, { email });
+            }
+            core.exportVariable('EMAIL_NORMALIZED', email);
+
+            // 2) 필수 필드
+            const username = (USERNAME || '').trim();
+            const fullName = (FULL_NAME || '').trim();
+            if (!username || !fullName) {
+              return setStatus('rejected', 'GitHub 사용자명 또는 성명이 비어 있습니다.', { email });
+            }
+
+            // 3) GitHub username 존재 검증
+            try {
+              await github.rest.users.getByUsername({ username });
+            } catch (e) {
+              return setStatus('rejected', `GitHub 사용자명을 찾을 수 없습니다.`, { email });
+            }
+
+            // 4) 이미 협업자인지
+            try {
+              await github.rest.repos.checkCollaborator({
+                owner: PRIVATE_OWNER, repo: PRIVATE_REPO, username,
+              });
+              return setStatus('already-member', '이미 협업자입니다.', { email });
+            } catch (e) {
+              if (e.status !== 404) {
+                return setStatus('rejected', `협업자 상태 확인 실패: ${e.message}`, { email });
+              }
+            }
+
+            // 5) 협업자 등록 (Read 권한)
+            try {
+              await github.rest.repos.addCollaborator({
+                owner: PRIVATE_OWNER, repo: PRIVATE_REPO, username,
+                permission: 'pull',
+              });
+            } catch (e) {
+              return setStatus('rejected', `자동 초대 실패: ${e.message}`, { email });
+            }
+
+            return setStatus('invited', '초대 완료', { email });
+
+      - name: Notify user (status comment)
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.ADMIN_PAT }}
+          script: |
+            const status = '${{ steps.process.outputs.status }}';
+            const reason = `${{ steps.process.outputs.reason }}`;
+
+            const messages = {
+              'invited': '✅ 초대 메일이 발송됐습니다. 본인 GitHub 계정의 verified email을 확인하세요. 본 신청 기록은 개인정보 보호를 위해 곧 자동 삭제됩니다.',
+              'already-member': 'ℹ️ 이미 협업자입니다. 추가 작업 필요 없습니다. 본 신청은 곧 자동 삭제됩니다.',
+              'rejected': `❌ 거부 — ${reason}\n\n다시 신청하시려면 새 issue를 작성해주세요. 본 신청은 곧 자동 삭제됩니다.`,
+            };
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: messages[status] || `처리 결과 없음`,
+            });
+
+      - name: Pre-redact body (sanitize edit history)
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.ADMIN_PAT }}
+          script: |
+            // edit history에 PII 잔존을 막기 위해 본문을 먼저 sanitize
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              title: '[처리됨]',
+              body: '[processed - PII purged]',
+              state: 'closed',
+              state_reason: 'completed',
+            });
+
+      - name: Privacy action (delete | lock | keep)
+        if: env.PRIVACY_MODE != 'keep'
+        env:
+          # OWNER_PAT은 issue 삭제 권한이 있는 org owner의 PAT (예: methylome).
+          # ADMIN_PAT(mabik-bot)으로 fallback — lock 모드에서는 admin으로 충분.
+          # delete 모드에서 OWNER_PAT 미설정 시 deleteIssue가 FORBIDDEN으로 실패함.
+          GH_TOKEN: ${{ secrets.OWNER_PAT || secrets.ADMIN_PAT }}
+          ISSUE_NODE_ID: ${{ github.event.issue.node_id }}
+        run: |
+          if [ "$PRIVACY_MODE" = "delete" ]; then
+            echo "Deleting issue (PRIVACY_MODE=delete)..."
+            gh api graphql -f query='
+              mutation($id: ID!) {
+                deleteIssue(input: { issueId: $id }) {
+                  repository { id }
+                }
+              }
+            ' -f id="$ISSUE_NODE_ID"
+          elif [ "$PRIVACY_MODE" = "lock" ]; then
+            echo "Locking issue (PRIVACY_MODE=lock)..."
+            gh api -X PUT "repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/lock" \
+              -f lock_reason=resolved
+          fi

@@ -1,0 +1,92 @@
+name: 액세스 요청
+description: groupware private 리포 읽기 권한을 신청합니다.
+title: "[access-request]"
+labels: ["access-request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        MABIK 사내용 자동화 도구 `mabik-groupware` 리포 액세스 신청 폼입니다.
+
+        모든 항목을 정확히 작성해 제출하면 자동으로 GitHub 초대 메일이 발송됩니다.
+        이메일 도메인이 `@mabik.re.kr`이 아닐 경우 자동 거부됩니다.
+
+        > **제목은 비워두거나 그대로 두세요** — 처리 시 자동으로 `[액세스 요청] @username` 형식으로 정리됩니다.
+
+        ### 🔒 개인정보 처리 안내
+
+        본 폼에 입력하시는 **성명 · 이메일 · 부서**는 다음과 같이 처리됩니다.
+
+        - **수집 목적** — 자동초대 처리(이메일 도메인 검증, 협업자 등록) 및 운영 감사 기록
+        - **공개 노출 시간** — issue 작성 직후 ~1분 (Action 처리 완료까지)
+        - **자동 삭제** — 처리 완료 즉시 본 신청 issue는 **자동으로 삭제**되어 외부에서 조회 불가
+        - **감사 보관** — 처리 결과는 비공개 audit 리포에 issue 형태로 보관되며, 관리자만 열람 가능
+        - **결과 통보** — 처리 결과는 본인 GitHub 알림 + 본인 verified 이메일로 도착 (issue 삭제 후에도 사용자 inbox에 보존됨)
+        - **거부 사유** — 도메인 불일치 등 거부 시 사유 댓글 표시 후 issue 삭제
+
+        제출은 위 처리 방식에 동의하는 것으로 간주됩니다.
+
+  - type: input
+    id: github_username
+    attributes:
+      label: GitHub 사용자명
+      description: 본인 GitHub username (예 — `gdhong`). https://github.com/settings/profile 에서 확인.
+      placeholder: gdhong
+    validations:
+      required: true
+
+  - type: input
+    id: full_name
+    attributes:
+      label: 성명 (한글)
+      description: 본인 성명을 한글로 정확히 입력.
+      placeholder: 홍길동
+    validations:
+      required: true
+
+  - type: input
+    id: email
+    attributes:
+      label: 회사 이메일 ID
+      description: "`@mabik.re.kr`은 자동으로 붙습니다. 앞부분만 입력하세요. (전체 이메일을 입력해도 됩니다)"
+      placeholder: gdhong
+    validations:
+      required: true
+
+  - type: input
+    id: department
+    attributes:
+      label: 소속 / 부서
+    validations:
+      required: true
+
+  - type: dropdown
+    id: client
+    attributes:
+      label: 사용 환경
+      options:
+        - Claude Desktop
+        - Claude Code CLI
+        - Codex CLI
+        - Gemini CLI
+        - 기타
+    validations:
+      required: true
+
+  - type: textarea
+    id: purpose
+    attributes:
+      label: 사용 목적 (선택)
+      description: 어떤 업무에 쓸지 간단히 적어주시면 운영에 도움이 됩니다.
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: 동의 사항
+      options:
+        - label: 위 정보가 본인 정보임을 확인합니다.
+          required: true
+        - label: 본 도구는 MABIK 사내 자동화 용도로만 사용하며, 외부에 공유하지 않습니다.
+          required: true
+        - label: 본 신청 처리 후 issue가 자동 삭제되며, 처리 기록은 관리자 전용 비공개 audit 리포에 보관됨에 동의합니다.
+          required: true

@@ -1,0 +1,4 @@
+# 사용자가 빈 issue를 만들 수 없도록 차단.
+# 신청은 access-request.yml 폼으로만 가능.
+blank_issues_enabled: false
+contact_links: []
