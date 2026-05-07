@@ -122,7 +122,7 @@ jobs:
                     `| 작성자(GitHub) | ${submitter} |`,
                     `| GitHub 사용자명(폼) | ${(USERNAME || '').trim() || '-'} |`,
                     `| 성명 | ${(FULL_NAME || '').trim() || '-'} |`,
-                    `| 이메일(추정) | ${extra.email || '-'} |`,
+                    `| 이메일(추정) | \`${extra.email || '-'}\` |`,
                     `| 부서 | ${(DEPT || '').trim() || '-'} |`,
                     `| 사용 환경 | ${(CLIENT || '').trim() || '-'} |`,
                     `| 사용 목적 | ${(PURPOSE || '').trim() || '-'} |`,
