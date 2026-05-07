@@ -3,7 +3,7 @@ name: Auto-invite to private repo
 # 동작:
 # 1. 사용자가 access-request 폼으로 issue 작성 (잠시 공개됨, 수 초~1분)
 # 2. 본 워크플로우가 즉시 작동:
-#    a. 입력값 파싱 + 이메일 도메인 검증
+#    a. 입력값 파싱
 #    b. 협업자 등록 (자동초대)
 #    c. 감사 로그를 private audit 리포에 복사 (PII 보존)
 #    d. 원본 issue body를 "[처리됨]"으로 redact (edit history도 sanitize)
@@ -33,8 +33,8 @@ jobs:
       AUDIT_OWNER: mabik
       AUDIT_REPO: groupware-audit
       PRIVACY_MODE: delete
-      # Admin/bot 계정은 검증 건너뜀 — 콤마 구분 GitHub username 목록.
-      # 이 목록의 계정이 폼을 제출하면 이메일 도메인 검증 없이 통과 후 이미 협업자(또는 자동초대) 처리.
+      # Admin/bot 계정 — 콤마 구분 GitHub username 목록. 향후 추가 검증을
+      # 도입할 경우 이 목록의 계정은 우회시킨다.
       ADMIN_USERNAMES: "methylome,mabik-bot"
     steps:
       - name: Checkout (필요 — issue parser가 템플릿 파일을 디스크에서 읽음)
@@ -55,7 +55,6 @@ jobs:
 
       - name: Mask parsed values in logs
         run: |
-          echo "::add-mask::${{ steps.parse.outputs.issueparser_email }}"
           echo "::add-mask::${{ steps.parse.outputs.issueparser_full_name }}"
           echo "::add-mask::${{ steps.parse.outputs.issueparser_department }}"
 
@@ -80,7 +79,6 @@ jobs:
         env:
           USERNAME: ${{ steps.parse.outputs.issueparser_github_username }}
           FULL_NAME: ${{ steps.parse.outputs.issueparser_full_name }}
-          EMAIL: ${{ steps.parse.outputs.issueparser_email }}
           DEPT: ${{ steps.parse.outputs.issueparser_department }}
           CLIENT: ${{ steps.parse.outputs.issueparser_client }}
           PURPOSE: ${{ steps.parse.outputs.issueparser_purpose }}
@@ -88,7 +86,7 @@ jobs:
           github-token: ${{ secrets.ADMIN_PAT }}
           script: |
             const {
-              USERNAME, FULL_NAME, EMAIL, DEPT, CLIENT, PURPOSE,
+              USERNAME, FULL_NAME, DEPT, CLIENT, PURPOSE,
               PRIVATE_OWNER, PRIVATE_REPO, ALLOWED_DOMAIN,
               AUDIT_OWNER, AUDIT_REPO, ADMIN_USERNAMES,
             } = process.env;
@@ -118,7 +116,7 @@ jobs:
                     `| 작성자(GitHub) | @${submitter} |`,
                     `| GitHub 사용자명(폼) | @${(USERNAME || '').trim() || '-'} |`,
                     `| 성명 | ${(FULL_NAME || '').trim() || '-'} |`,
-                    `| 이메일 | ${extra.email || EMAIL || '-'} |`,
+                    `| 이메일(추정) | ${extra.email || '-'} |`,
                     `| 부서 | ${(DEPT || '').trim() || '-'} |`,
                     `| 사용 환경 | ${(CLIENT || '').trim() || '-'} |`,
                     `| 사용 목적 | ${(PURPOSE || '').trim() || '-'} |`,
@@ -139,28 +137,41 @@ jobs:
               await writeAudit(status, { ...extra, reason });
             };
 
-            // 1) 이메일 정규화 + 도메인 검증 (admin은 우회)
-            let email = (EMAIL || '').trim().toLowerCase();
-            if (!email.includes('@')) {
-              email = email + '@' + ALLOWED_DOMAIN;
-            }
-            if (!isAdmin && !email.endsWith('@' + ALLOWED_DOMAIN)) {
-              return setStatus('rejected', `이메일 도메인이 @${ALLOWED_DOMAIN}이 아닙니다.`, { email });
-            }
-            core.exportVariable('EMAIL_NORMALIZED', email);
-
-            // 2) 필수 필드
+            // 1) 필수 필드
             const username = (USERNAME || '').trim();
             const fullName = (FULL_NAME || '').trim();
             if (!username || !fullName) {
-              return setStatus('rejected', 'GitHub 사용자명 또는 성명이 비어 있습니다.', { email });
+              return setStatus('rejected', 'GitHub 사용자명 또는 성명이 비어 있습니다.', { email: '-' });
             }
 
-            // 3) GitHub username 존재 검증
+            // 2) 본인 인증 — issue 작성자(submitter)가 폼의 username과 일치해야 함.
+            // 다른 사람을 사칭해 초대를 끌어가는 시나리오 차단.
+            if (!isAdmin && submitter !== username.toLowerCase()) {
+              return setStatus('rejected',
+                `폼의 GitHub 사용자명(${username})이 issue 작성자(${submitter})와 일치하지 않습니다. 본인 계정으로 직접 신청해주세요.`,
+                { email: '-' });
+            }
+
+            // 3) GitHub username 존재 + Public email 검증.
+            // 이메일은 사용자가 Settings → Public profile → Public email로
+            // 공개 설정한 verified 주소만 API에 노출되므로 실제 소유 증명임.
+            // 비공개 상태면 .email === null → "Public email 미설정" 안내.
+            let email;
             try {
-              await github.rest.users.getByUsername({ username });
+              const u = await github.rest.users.getByUsername({ username });
+              email = (u.data.email || '').toLowerCase();
             } catch (e) {
-              return setStatus('rejected', `GitHub 사용자명을 찾을 수 없습니다.`, { email });
+              return setStatus('rejected', `GitHub 사용자명을 찾을 수 없습니다.`, { email: '-' });
+            }
+            if (!isAdmin && !email) {
+              return setStatus('rejected',
+                `GitHub Public email이 설정되어 있지 않습니다. Settings → Public profile → Public email을 사내 이메일(@${ALLOWED_DOMAIN})로 지정 후 재신청해주세요. (초대 수락 후 다시 비공개로 돌릴 수 있습니다.)`,
+                { email: '-' });
+            }
+            if (!isAdmin && !email.endsWith('@' + ALLOWED_DOMAIN)) {
+              return setStatus('rejected',
+                `GitHub Public email(${email})이 사내 도메인(@${ALLOWED_DOMAIN})이 아닙니다.`,
+                { email });
             }
 
             // 4) 이미 협업자인지
