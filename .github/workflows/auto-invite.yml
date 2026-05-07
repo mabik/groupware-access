@@ -103,7 +103,13 @@ jobs:
                 await github.rest.issues.create({
                   owner: AUDIT_OWNER,
                   repo: AUDIT_REPO,
-                  title: `[${status}] @${(USERNAME || 'unknown').trim()}` +
+                  // No `@` prefix on usernames — would auto-mention the user.
+                  // Brand-new accounts (created < ~30min before issue) trip
+                  // GitHub's anti-abuse heuristic and the audit issue gets
+                  // shadow-suppressed from listings/search. The audit log is
+                  // for admin review, not user notification, so the `@`
+                  // adds no value and only triggers the suppression.
+                  title: `[${status}] ${(USERNAME || 'unknown').trim()}` +
                          (FULL_NAME ? ` (${FULL_NAME.trim()})` : ''),
                   body: [
                     '## 액세스 요청 처리 기록',
@@ -113,8 +119,8 @@ jobs:
                     '',
                     '| 항목 | 값 |',
                     '|------|-----|',
-                    `| 작성자(GitHub) | @${submitter} |`,
-                    `| GitHub 사용자명(폼) | @${(USERNAME || '').trim() || '-'} |`,
+                    `| 작성자(GitHub) | ${submitter} |`,
+                    `| GitHub 사용자명(폼) | ${(USERNAME || '').trim() || '-'} |`,
                     `| 성명 | ${(FULL_NAME || '').trim() || '-'} |`,
                     `| 이메일(추정) | ${extra.email || '-'} |`,
                     `| 부서 | ${(DEPT || '').trim() || '-'} |`,
