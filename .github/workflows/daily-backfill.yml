@@ -111,3 +111,162 @@ jobs:
               body: lines.join('\n'),
               labels: ['audit', 'backfill-alert'],
             });
+
+  # Shape B onboarding (mabik/groupware#248) — graduate legacy direct-collabs
+  # to the unified Member + staff-team channel.
+  #
+  # Sweeps Outside Collaborators on mabik/groupware whose org-membership
+  # AND staff-team-membership are BOTH already `active`. That state means
+  # they've completed the Shape B onboarding (the org invite was accepted
+  # and the team add stuck) but their pre-existing direct-collab grant is
+  # still hanging around as duplicated state. Removing the direct-collab
+  # grant collapses everyone to one channel without disturbing access.
+  #
+  # SAFETY: this job ONLY removes the redundant collab grant — never
+  # invites, never adds to teams, never affects anyone whose org or team
+  # state is anything other than `active` (pending/inactive/missing all
+  # short-circuit to skip-silently). Operationally that means: legacy
+  # Outside Collabs who haven't been promoted to Member yet are left
+  # untouched and surface in the org via the existing audit/backfill
+  # alerting; this job only fires on users for whom both pieces of state
+  # already coexist, so the worst-case is a no-op cycle.
+  #
+  # Hard-coded exclusion: `mabik-bot` stays an Outside Collab with admin
+  # rights by design (per CJH lock); never graduated.
+  graduate-legacy-collabs:
+    runs-on: ubuntu-latest
+    env:
+      PRIVATE_OWNER: mabik
+      PRIVATE_REPO: groupware
+      STAFF_TEAM_SLUG: staff
+      AUDIT_OWNER: mabik
+      AUDIT_REPO: groupware-audit
+      # Outside Collabs that must NEVER be graduated. Comma-separated
+      # GitHub username list, lowercased at compare time.
+      SKIP_USERNAMES: "mabik-bot"
+    steps:
+      - name: Scan + graduate Outside Collabs whose org+team state is active
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.ADMIN_PAT }}
+          script: |
+            const {
+              PRIVATE_OWNER, PRIVATE_REPO, STAFF_TEAM_SLUG,
+              AUDIT_OWNER, AUDIT_REPO, SKIP_USERNAMES,
+            } = process.env;
+            const skip = new Set(
+              (SKIP_USERNAMES || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+            );
+
+            // Audit-issue writer for the `graduated` status verb. Modeled on
+            // auto-invite.yml's writeAudit helper but with graduation-specific
+            // fields (no email/dept/purpose — those came from the original
+            // access-request form, which is long gone by the time a user
+            // becomes eligible for graduation).
+            const writeAudit = async (username, extra = {}) => {
+              try {
+                await github.rest.issues.create({
+                  owner: AUDIT_OWNER,
+                  repo: AUDIT_REPO,
+                  title: `[graduated] ${username}`,
+                  body: [
+                    '## 직접-collab 정리 (Shape B 단일채널 마이그레이션)',
+                    '',
+                    '**status:** graduated',
+                    extra.reason ? `**note:** ${extra.reason}` : '',
+                    '',
+                    '| 항목 | 값 |',
+                    '|------|-----|',
+                    `| GitHub 사용자명 | ${username} |`,
+                    `| 처리 시각 | ${new Date().toISOString()} |`,
+                    `| org 멤버십 | active |`,
+                    `| ${STAFF_TEAM_SLUG} 팀 멤버십 | active |`,
+                    `| 적용 작업 | mabik/${PRIVATE_REPO} 직접-collab 제거 |`,
+                    `| 참고 | mabik/groupware#248 (Shape B onboarding) |`,
+                  ].filter(Boolean).join('\n'),
+                  labels: ['audit', 'graduated'],
+                });
+              } catch (e) {
+                core.warning(`graduated audit write failed for ${username}: ${e.message}`);
+              }
+            };
+
+            // 1) Enumerate Outside Collaborators on the private repo.
+            const outside = await github.paginate(
+              github.rest.repos.listCollaborators,
+              { owner: PRIVATE_OWNER, repo: PRIVATE_REPO, affiliation: 'outside', per_page: 100 },
+            );
+            console.log(`Found ${outside.length} outside collaborator(s) on ${PRIVATE_OWNER}/${PRIVATE_REPO}.`);
+
+            let graduatedCount = 0;
+            const skipped = [];
+
+            for (const c of outside) {
+              const username = c.login;
+              const lower = username.toLowerCase();
+              if (skip.has(lower)) {
+                skipped.push({ username, reason: 'hard-coded skip' });
+                continue;
+              }
+
+              // 2) Org membership state must be `active`.
+              let orgState;
+              try {
+                const m = await github.rest.orgs.getMembershipForUser({
+                  org: PRIVATE_OWNER, username,
+                });
+                orgState = m.data.state;
+              } catch (e) {
+                if (e.status === 404) {
+                  skipped.push({ username, reason: 'not org member' });
+                  continue;
+                }
+                core.warning(`org membership check failed for ${username}: ${e.message}`);
+                skipped.push({ username, reason: `org check error: ${e.message}` });
+                continue;
+              }
+              if (orgState !== 'active') {
+                skipped.push({ username, reason: `org state=${orgState}` });
+                continue;
+              }
+
+              // 3) staff-team membership state must be `active`.
+              let teamState;
+              try {
+                const m = await github.rest.teams.getMembershipForUserInOrg({
+                  org: PRIVATE_OWNER, team_slug: STAFF_TEAM_SLUG, username,
+                });
+                teamState = m.data.state;
+              } catch (e) {
+                if (e.status === 404) {
+                  skipped.push({ username, reason: `not in ${STAFF_TEAM_SLUG} team` });
+                  continue;
+                }
+                core.warning(`team membership check failed for ${username}: ${e.message}`);
+                skipped.push({ username, reason: `team check error: ${e.message}` });
+                continue;
+              }
+              if (teamState !== 'active') {
+                skipped.push({ username, reason: `team state=${teamState}` });
+                continue;
+              }
+
+              // 4) Both states active → remove the direct-collab grant.
+              try {
+                await github.rest.repos.removeCollaborator({
+                  owner: PRIVATE_OWNER, repo: PRIVATE_REPO, username,
+                });
+              } catch (e) {
+                core.warning(`removeCollaborator failed for ${username}: ${e.message}`);
+                skipped.push({ username, reason: `remove failed: ${e.message}` });
+                continue;
+              }
+              graduatedCount++;
+              await writeAudit(username);
+              console.log(`Graduated ${username} (direct-collab grant removed; access continues via ${STAFF_TEAM_SLUG} team).`);
+            }
+
+            console.log(`Cycle complete: graduated=${graduatedCount}, skipped=${skipped.length}.`);
+            for (const s of skipped) console.log(`  skip ${s.username}: ${s.reason}`);
+
+            core.setOutput('graduated', String(graduatedCount));
