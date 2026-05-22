@@ -210,6 +210,22 @@ jobs:
               return setStatus('rejected', `자동 초대 실패: ${e.message}`, { email });
             }
 
+            // 6) staff 팀 자동 추가 (Shape B — mabik/groupware#248)
+            // 단일 채널 멤버십 모델: mabik/staff 팀이 mabik/groupware의 Read 권한을
+            // 부여한다 (default_repository_permission='none' 가정). org 초대 수락 전에
+            // 호출해도 pending 상태로 큐잉되며, 사용자가 org 초대를 수락하는 순간
+            // org member + team member가 동시에 active로 전환된다.
+            // 실패는 비치명적: 사용자는 org 초대 자체는 받았으므로 운영자가 수동으로
+            // 보강할 수 있고, daily-backfill의 graduate-legacy-collabs 잡이 다음
+            // 사이클에서 동일 상태(org active && team active) 검사로 재시도 가능.
+            try {
+              await github.rest.teams.addOrUpdateMembershipForUserInOrg({
+                org: PRIVATE_OWNER, team_slug: 'staff', username, role: 'member',
+              });
+            } catch (e) {
+              core.warning(`staff 팀 자동 추가 실패 (사용자는 org 초대만 수신): ${e.message}`);
+            }
+
             return setStatus('invited', '초대 완료', { email });
 
       - name: Notify user (status comment)
@@ -221,9 +237,9 @@ jobs:
             const reason = `${{ steps.process.outputs.reason }}`;
 
             const messages = {
-              'invited': '✅ 초대 메일이 발송됐습니다. 본인 GitHub 계정의 verified email을 확인하세요. 본 신청 기록은 개인정보 보호를 위해 곧 자동 삭제됩니다.',
+              'invited': '✅ 조직 초대 메일이 발송됐습니다. 본인 GitHub 계정의 verified email을 확인하세요. 초대 수락 시 자동으로 `mabik/staff` 팀에 추가되어 `mabik/groupware` 접근이 활성화됩니다 (별도 작업 필요 없음). 본 신청 기록은 개인정보 보호를 위해 곧 자동 삭제됩니다.',
               'already-member': 'ℹ️ 이미 조직 멤버입니다. 추가 작업 필요 없습니다. 본 신청은 곧 자동 삭제됩니다.',
-              'invite-pending': '✉️ 초대 메일을 보냈으니 본인 GitHub 계정의 verified email을 확인해주세요. 본 신청은 곧 자동 삭제됩니다.',
+              'invite-pending': '✉️ 초대 메일을 보냈으니 본인 GitHub 계정의 verified email을 확인해주세요. 초대 수락 시 `mabik/staff` 팀에 자동 추가됩니다. 본 신청은 곧 자동 삭제됩니다.',
               'rejected': `❌ 거부 — ${reason}\n\n다시 신청하시려면 새 issue를 작성해주세요. 본 신청은 곧 자동 삭제됩니다.`,
             };
 
