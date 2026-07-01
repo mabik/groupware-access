@@ -60,6 +60,7 @@ body:
         - Claude Code CLI
         - Codex CLI
         - Gemini CLI
+        - ChatGPT
         - 기타
     validations:
       required: true
