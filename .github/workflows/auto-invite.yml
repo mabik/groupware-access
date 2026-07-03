@@ -44,8 +44,14 @@ jobs:
         env:
           BODY: ${{ github.event.issue.body }}
         run: |
-          # 본문 전체를 즉시 마스킹 처리. Action 로그에 PII가 새지 않도록.
-          echo "::add-mask::${BODY}"
+          # 본문을 줄 단위로 즉시 마스킹 처리. Action 로그에 PII가 새지 않도록.
+          # (::add-mask::는 줄 단위로만 동작 — 통째로 넘기면 첫 줄만 마스킹됨)
+          # CRLF 정규화 — 빈 줄의 잔여 \r이 empty-mask 경고를 내거나, 줄 중간
+          # \r이 커맨드를 쪼개 나머지를 raw로 노출하는 것을 방지
+          BODY="${BODY//$'\r'/$'\n'}"
+          while IFS= read -r line; do
+            if [ -n "$line" ]; then echo "::add-mask::$line"; fi
+          done <<< "${BODY}"
 
       - name: Parse issue body
         id: parse
@@ -54,9 +60,13 @@ jobs:
           template-path: .github/ISSUE_TEMPLATE/access-request.yml
 
       - name: Mask parsed values in logs
+        env:
+          # 사용자 입력을 ${{ }}로 스크립트에 직접 보간하지 말 것 (shell injection) — env로 전달
+          FULL_NAME: ${{ steps.parse.outputs.issueparser_full_name }}
+          DEPT: ${{ steps.parse.outputs.issueparser_department }}
         run: |
-          echo "::add-mask::${{ steps.parse.outputs.issueparser_full_name }}"
-          echo "::add-mask::${{ steps.parse.outputs.issueparser_department }}"
+          if [ -n "$FULL_NAME" ]; then echo "::add-mask::${FULL_NAME}"; fi
+          if [ -n "$DEPT" ]; then echo "::add-mask::${DEPT}"; fi
 
       - name: Normalize issue title (overwrite user-edited title)
         uses: actions/github-script@v7
@@ -227,11 +237,15 @@ jobs:
 
       - name: Notify user (status comment)
         uses: actions/github-script@v7
+        env:
+          # reason에는 사용자 email/API 오류 메시지가 섞일 수 있음 — 스크립트에 직접 보간 금지
+          STATUS: ${{ steps.process.outputs.status }}
+          REASON: ${{ steps.process.outputs.reason }}
         with:
           github-token: ${{ secrets.ADMIN_PAT }}
           script: |
-            const status = '${{ steps.process.outputs.status }}';
-            const reason = `${{ steps.process.outputs.reason }}`;
+            const status = process.env.STATUS || '';
+            const reason = process.env.REASON || '';
 
             const messages = {
               'invited': '✅ 조직 초대 메일이 발송됐습니다. 본인 GitHub 계정의 verified email을 확인하세요. 초대 수락 시 자동으로 `mabik/staff` 팀에 추가되어 `mabik/groupware` 접근이 활성화됩니다 (별도 작업 필요 없음). 본 신청 기록은 개인정보 보호를 위해 곧 자동 삭제됩니다.',
