@@ -4,9 +4,9 @@
 
 ## 신청 방법
 
-1. **[Issues 탭에서 "액세스 요청" 폼 작성](https://github.com/mabik/groupware-access/issues/new/choose)**
-2. GitHub 사용자명, 회사 이메일 ID, 성명, 부서 입력
-3. 제출 → `@mabik.re.kr` 이메일 도메인 자동 검증 → 협업자로 등록 → 초대 메일 발송
+1. 본인 GitHub 계정의 **Public email**을 사내 메일(`@mabik.re.kr`)로 설정 (Settings → Public profile)
+2. **본인 계정으로 로그인한 상태**에서 **[Issues 탭의 "액세스 요청" 폼 작성](https://github.com/mabik/groupware-access/issues/new/choose)** — GitHub 사용자명은 작성 계정으로 자동 인식
+3. 성명 · 부서 입력 후 제출 → Public email 도메인 자동 검증 → org 멤버 초대 메일 발송
 
 처리 시간: 약 30초~1분.
 
