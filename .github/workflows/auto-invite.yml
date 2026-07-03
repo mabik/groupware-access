@@ -3,7 +3,7 @@ name: Auto-invite to private repo
 # 동작:
 # 1. 사용자가 access-request 폼으로 issue 작성 (잠시 공개됨, 수 초~1분)
 # 2. 본 워크플로우가 즉시 작동:
-#    a. 입력값 파싱
+#    a. 입력값 파싱 (GitHub 사용자명은 폼 입력이 아니라 issue 작성자 계정에서 자동 도출)
 #    b. 협업자 등록 (자동초대)
 #    c. 감사 로그를 private audit 리포에 복사 (PII 보존)
 #    d. 원본 issue body를 "[처리됨]"으로 redact (edit history도 sanitize)
@@ -44,8 +44,14 @@ jobs:
         env:
           BODY: ${{ github.event.issue.body }}
         run: |
-          # 본문 전체를 즉시 마스킹 처리. Action 로그에 PII가 새지 않도록.
-          echo "::add-mask::${BODY}"
+          # 본문을 줄 단위로 즉시 마스킹 처리. Action 로그에 PII가 새지 않도록.
+          # (::add-mask::는 줄 단위로만 동작 — 통째로 넘기면 첫 줄만 마스킹됨)
+          # CRLF 정규화 — 빈 줄의 잔여 \r이 empty-mask 경고를 내거나, 줄 중간
+          # \r이 커맨드를 쪼개 나머지를 raw로 노출하는 것을 방지
+          BODY="${BODY//$'\r'/$'\n'}"
+          while IFS= read -r line; do
+            if [ -n "$line" ]; then echo "::add-mask::$line"; fi
+          done <<< "${BODY}"
 
       - name: Parse issue body
         id: parse
@@ -54,14 +60,18 @@ jobs:
           template-path: .github/ISSUE_TEMPLATE/access-request.yml
 
       - name: Mask parsed values in logs
+        env:
+          # 사용자 입력을 ${{ }}로 스크립트에 직접 보간하지 말 것 (shell injection) — env로 전달
+          FULL_NAME: ${{ steps.parse.outputs.issueparser_full_name }}
+          DEPT: ${{ steps.parse.outputs.issueparser_department }}
         run: |
-          echo "::add-mask::${{ steps.parse.outputs.issueparser_full_name }}"
-          echo "::add-mask::${{ steps.parse.outputs.issueparser_department }}"
+          if [ -n "$FULL_NAME" ]; then echo "::add-mask::${FULL_NAME}"; fi
+          if [ -n "$DEPT" ]; then echo "::add-mask::${DEPT}"; fi
 
       - name: Normalize issue title (overwrite user-edited title)
         uses: actions/github-script@v7
         env:
-          USERNAME: ${{ steps.parse.outputs.issueparser_github_username }}
+          USERNAME: ${{ github.event.issue.user.login }}
         with:
           github-token: ${{ secrets.ADMIN_PAT }}
           script: |
@@ -77,7 +87,8 @@ jobs:
         id: process
         uses: actions/github-script@v7
         env:
-          USERNAME: ${{ steps.parse.outputs.issueparser_github_username }}
+          # 폼 입력이 아니라 issue 작성자 계정 — 본인 인증이 구조적으로 보장됨
+          USERNAME: ${{ github.event.issue.user.login }}
           FULL_NAME: ${{ steps.parse.outputs.issueparser_full_name }}
           DEPT: ${{ steps.parse.outputs.issueparser_department }}
           CLIENT: ${{ steps.parse.outputs.issueparser_client }}
@@ -120,7 +131,6 @@ jobs:
                     '| 항목 | 값 |',
                     '|------|-----|',
                     `| 작성자(GitHub) | ${submitter} |`,
-                    `| GitHub 사용자명(폼) | ${(USERNAME || '').trim() || '-'} |`,
                     `| 성명 | ${(FULL_NAME || '').trim() || '-'} |`,
                     `| 이메일(추정) | \`${extra.email || '-'}\` |`,
                     `| 부서 | ${(DEPT || '').trim() || '-'} |`,
@@ -143,22 +153,16 @@ jobs:
               await writeAudit(status, { ...extra, reason });
             };
 
-            // 1) 필수 필드
+            // 1) 필수 필드. username은 issue 작성자 계정에서 도출되므로 항상
+            // 존재하며, 본인 인증(사칭 차단)도 구조적으로 보장된다 — 다른 사람의
+            // username을 적어 초대를 끌어가는 경로 자체가 없다.
             const username = (USERNAME || '').trim();
             const fullName = (FULL_NAME || '').trim();
-            if (!username || !fullName) {
-              return setStatus('rejected', 'GitHub 사용자명 또는 성명이 비어 있습니다.', { email: '-' });
+            if (!fullName) {
+              return setStatus('rejected', '성명이 비어 있습니다.', { email: '-' });
             }
 
-            // 2) 본인 인증 — issue 작성자(submitter)가 폼의 username과 일치해야 함.
-            // 다른 사람을 사칭해 초대를 끌어가는 시나리오 차단.
-            if (!isAdmin && submitter !== username.toLowerCase()) {
-              return setStatus('rejected',
-                `폼의 GitHub 사용자명(${username})이 issue 작성자(${submitter})와 일치하지 않습니다. 본인 계정으로 직접 신청해주세요.`,
-                { email: '-' });
-            }
-
-            // 3) GitHub username 존재 + Public email 검증.
+            // 2) Public email 검증 (username은 작성자 계정이므로 항상 존재).
             // 이메일은 사용자가 Settings → Public profile → Public email로
             // 공개 설정한 verified 주소만 API에 노출되므로 실제 소유 증명임.
             // 비공개 상태면 .email === null → "Public email 미설정" 안내.
@@ -167,7 +171,10 @@ jobs:
               const u = await github.rest.users.getByUsername({ username });
               email = (u.data.email || '').toLowerCase();
             } catch (e) {
-              return setStatus('rejected', `GitHub 사용자명을 찾을 수 없습니다.`, { email: '-' });
+              // username은 issue 작성자라 항상 존재 — 여기 도달하면 API 장애다.
+              return setStatus('rejected',
+                `GitHub 계정 정보 조회에 실패했습니다 (일시적 오류일 수 있음): ${e.message}. 잠시 후 다시 신청해주세요.`,
+                { email: '-' });
             }
             if (!isAdmin && !email) {
               return setStatus('rejected',
@@ -180,7 +187,7 @@ jobs:
                 { email });
             }
 
-            // 4) 이미 조직 멤버인지
+            // 3) 이미 조직 멤버인지
             try {
               const m = await github.rest.orgs.getMembershipForUser({
                 org: PRIVATE_OWNER, username,
@@ -201,7 +208,7 @@ jobs:
               }
             }
 
-            // 5) 조직 멤버 등록
+            // 4) 조직 멤버 등록
             try {
               await github.rest.orgs.setMembershipForUser({
                 org: PRIVATE_OWNER, username, role: 'member',
@@ -210,7 +217,7 @@ jobs:
               return setStatus('rejected', `자동 초대 실패: ${e.message}`, { email });
             }
 
-            // 6) staff 팀 자동 추가 (Shape B — mabik/groupware#248)
+            // 5) staff 팀 자동 추가 (Shape B — mabik/groupware#248)
             // 단일 채널 멤버십 모델: mabik/staff 팀이 mabik/groupware의 Read 권한을
             // 부여한다 (default_repository_permission='none' 가정). org 초대 수락 전에
             // 호출해도 pending 상태로 큐잉되며, 사용자가 org 초대를 수락하는 순간
@@ -230,11 +237,15 @@ jobs:
 
       - name: Notify user (status comment)
         uses: actions/github-script@v7
+        env:
+          # reason에는 사용자 email/API 오류 메시지가 섞일 수 있음 — 스크립트에 직접 보간 금지
+          STATUS: ${{ steps.process.outputs.status }}
+          REASON: ${{ steps.process.outputs.reason }}
         with:
           github-token: ${{ secrets.ADMIN_PAT }}
           script: |
-            const status = '${{ steps.process.outputs.status }}';
-            const reason = `${{ steps.process.outputs.reason }}`;
+            const status = process.env.STATUS || '';
+            const reason = process.env.REASON || '';
 
             const messages = {
               'invited': '✅ 조직 초대 메일이 발송됐습니다. 본인 GitHub 계정의 verified email을 확인하세요. 초대 수락 시 자동으로 `mabik/staff` 팀에 추가되어 `mabik/groupware` 접근이 활성화됩니다 (별도 작업 필요 없음). 본 신청 기록은 개인정보 보호를 위해 곧 자동 삭제됩니다.',
