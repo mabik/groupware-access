@@ -33,7 +33,7 @@ jobs:
     steps:
       - name: Find unprocessed issues
         id: scan
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.OWNER_PAT }}
           script: |
@@ -72,7 +72,7 @@ jobs:
 
       - name: Notify admin in audit repo
         if: steps.scan.outputs.count != '0'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           ISSUES_JSON: ${{ steps.scan.outputs.issues }}
         with:
@@ -146,7 +146,7 @@ jobs:
       SKIP_USERNAMES: "mabik-bot"
     steps:
       - name: Scan + graduate Outside Collabs whose org+team state is active
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.ADMIN_PAT }}
           script: |
