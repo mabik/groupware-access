@@ -69,7 +69,7 @@ jobs:
           if [ -n "$DEPT" ]; then echo "::add-mask::${DEPT}"; fi
 
       - name: Normalize issue title (overwrite user-edited title)
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           USERNAME: ${{ github.event.issue.user.login }}
         with:
@@ -85,7 +85,7 @@ jobs:
 
       - name: Validate, invite, audit-log
         id: process
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           # 폼 입력이 아니라 issue 작성자 계정 — 본인 인증이 구조적으로 보장됨
           USERNAME: ${{ github.event.issue.user.login }}
@@ -236,7 +236,7 @@ jobs:
             return setStatus('invited', '초대 완료', { email });
 
       - name: Notify user (status comment)
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           # reason에는 사용자 email/API 오류 메시지가 섞일 수 있음 — 스크립트에 직접 보간 금지
           STATUS: ${{ steps.process.outputs.status }}
@@ -262,7 +262,7 @@ jobs:
             });
 
       - name: Pre-redact body (sanitize edit history)
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.ADMIN_PAT }}
           script: |
